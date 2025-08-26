@@ -10,10 +10,10 @@ library(stringr)
 library(lubridate)
 library(tidyr)
 library(purrr)
-library(sf)
-library(leaflet)
-library(classInt)
-library(RColorBrewer)
+#library(sf)
+#library(leaflet)
+#library(classInt)
+#library(RColorBrewer)
 library(readxl)
 
 ### Shared Utility Functions ###
@@ -51,13 +51,18 @@ load_vdv_table <- function(folder, path) {
 }
 
 ### Stop Times Processing Functions ###
-create_trip_stop_mapping <- function(journey, route_sequence) {
+create_trip_stop_mapping <- function(journey, route_sequence, routes) {
   journey %>%
     left_join(route_sequence,
               by = c("BASE_VERSION" = "BASE_VERSION",
                      "LINE_NO" = "LINE_NO",
                      "ROUTE_ABBR" = "ROUTE_ABBR"),
               relationship = 'many-to-many') %>%
+    left_join(routes,
+              by=c("BASE_VERSION" = "BASE_VERSION",
+                   "LINE_NO" = "LINE_NO",
+                   "ROUTE_ABBR" = "ROUTE_ABBR")
+              ) %>%
     arrange(JOURNEY_NO, SEQUENCE_NO) %>%
     group_by(JOURNEY_NO) %>%
     mutate(
@@ -73,6 +78,7 @@ calculate_stop_times <- function(trip_stop_mapping, travel_time) {
                      "POINT_TYPE"="POINT_TYPE",
                      "POINT_NO" = "POINT_NO",
                      "TO_POINT_NO" = "TO_POINT_NO",
+                     "OP_DEP_NO"="OP_DEP_NO",
                      "TIMING_GROUP_NO" = "TIMING_GROUP_NO"
               )) %>%
     group_by(JOURNEY_NO) %>%
@@ -87,75 +93,11 @@ calculate_stop_times <- function(trip_stop_mapping, travel_time) {
       arrival_time = as.character(hms::hms(arrival_time)),
       departure_time = as.character(hms::hms(departure_time))
     )
+  #browser()
 }
 
-### Shapes Processing Functions ###
-process_route_shapes <- function(point_on_link, stop, link, route_sequence, routes) {
-  # Create link geometries
-  link_geoms <- point_on_link %>%
-    left_join(stop, by = c("BASE_VERSION" = "BASE_VERSION",
-                          "POINT_TO_LINK_NO" = "POINT_NO",
-                          "POINT_TO_LINK_TYPE" = "POINT_TYPE")) %>%
-    mutate(
-      POINT_LONGITUDE = convert_to_decimal(POINT_LONGITUDE),
-      POINT_LATITUDE = convert_to_decimal(POINT_LATITUDE)
-    ) %>%
-    filter(!is.na(POINT_LONGITUDE)) %>%
-    group_by(OP_DEP_NO, POINT_TYPE, POINT_NO, TO_POINT_NO, TO_POINT_TYPE) %>%
-    arrange(POINT_ON_LINK_SERIAL_NO) %>%
-    summarize(
-      coords = list(cbind(POINT_LONGITUDE, POINT_LATITUDE)),
-      .groups = 'drop'
-    ) %>%
-    mutate(geometry = map(coords, st_linestring)) %>%
-    st_as_sf() %>%
-    select(-coords) %>%
-    st_set_crs(4326) %>%
-    left_join(link, by = c('OP_DEP_NO', 'POINT_TYPE', 'POINT_NO', 'TO_POINT_NO', 'TO_POINT_TYPE'))
 
-  # Process route sequence
-  route_seq <- route_sequence %>%
-    group_by(LINE_NO, ROUTE_ABBR) %>%
-    mutate(
-      TO_POINT_TYPE = lead(POINT_TYPE),
-      TO_POINT_NO = lead(POINT_NO)
-    ) %>%
-    ungroup() %>%
-    left_join(routes, by = c('BASE_VERSION', "LINE_NO", "ROUTE_ABBR")) %>%
-    filter(!is.na(TO_POINT_NO))
 
-  # Create complete route shapes
-  route_seq %>%
-    left_join(link_geoms, by = c('OP_DEP_NO', "POINT_TYPE", "POINT_NO", "TO_POINT_NO", "TO_POINT_TYPE")) %>%
-    group_by(LINE_NO, ROUTE_ABBR) %>%
-    arrange(SEQUENCE_NO) %>%
-    summarize(geometry = st_combine(geometry), .groups = "drop") %>%
-    mutate(geometry = st_line_merge(geometry))
-}
-
-### Visualization Functions ###
-create_plf_map <- function(route_shapes, plf_data) {
-  s_routes <- route_shapes %>%
-    left_join(plf_data, by = c("LINE_ABBR" = "LINE_NAME")) %>%
-    filter(ROUTE_ABBR %in% c(10), MODALITY_NAME == 'Abu Dhabi') %>%
-    mutate(PLF = as.numeric(PLF)) %>%
-    st_as_sf()
-
-  nbreaks <- 5
-  breaks <- classIntervals(s_routes$PLF, n = nbreaks, style = "jenks")$brks
-  pal <- colorBin(palette = "YlOrRd", domain = s_routes$PLF, bins = breaks)
-
-  leaflet() %>%
-    addProviderTiles("CartoDB.Positron") %>%
-    addPolylines(data = s_routes, color = ~pal(PLF), weight = 1) %>%
-    addLegend(
-      position = "bottomleft",
-      pal = pal,
-      values = s_routes$PLF,
-      title = "Peak Loading Factor",
-      opacity = 1
-    )
-}
 
 ### Main Execution ###
 day_type = 15
@@ -166,20 +108,17 @@ day_type = 15
   stop <- load_vdv_table(folder, "i2531280.x10")
   stop_point <- load_vdv_table(folder, "i2291280.x10")
   journey <- load_vdv_table(folder, "i7151280.x10")
-  travel_time <- load_vdv_table(folder, "i2821280.x10")
+  travel_time <- load_vdv_table(folder, "i2821280.x10") %>% distinct()
   route_sequence <- load_vdv_table(folder, "i2461280.x10")
   link <- load_vdv_table(folder, "i2991280.x10")
   point_on_link <- load_vdv_table(folder, "i9951280.x10")
   routes <- load_vdv_table(folder, "i2261280.x10")
 
   # Process stop times
-  trip_stop_mapping <- create_trip_stop_mapping(journey, route_sequence)
+  trip_stop_mapping <- create_trip_stop_mapping(journey, route_sequence,routes)
   trip_stop_mapping_rev <- trip_stop_mapping %>% filter(ROUTE_ABBR < 30)
-  stop_times <- calculate_stop_times(trip_stop_mapping_rev, travel_time) %>%
-    filter(DAY_TYPE_NO %in% c(day_type))
+  stop_times <- calculate_stop_times(trip_stop_mapping_rev, travel_time) 
 
-  # Process shapes
-  route_shapes <- process_route_shapes(point_on_link, stop, link, route_sequence, routes)
 
   # Create gtfs directory if it doesn't exist
   if (!dir.exists("gtfs")) {
@@ -195,18 +134,73 @@ day_type = 15
     mutate(route_type = 3) %>%
     write_csv("gtfs/routes.txt")
 
-  # trips.txt
-  stop_times %>%
-    select(trip_id = JOURNEY_NO, route_id = LINE_NO) %>%
-    mutate(service_id = 1) %>%
-    distinct() %>%
-    write_csv("gtfs/trips.txt")
+
 
   # stop_times.txt
   stop_times %>%
     select(trip_id = JOURNEY_NO, arrival_time, departure_time, 
            stop_id = POINT_NO, stop_sequence = SEQUENCE_NO) %>%
     write_csv("gtfs/stop_times.txt")
+
+
+  # Precompute stop coords
+  stop_coords <- stop %>%
+    filter(POINT_TYPE %in% c(1,2,42)) %>%
+    transmute(BASE_VERSION, POINT_NO, POINT_TYPE,
+              lon = convert_to_decimal(POINT_LONGITUDE),
+              lat = convert_to_decimal(POINT_LATITUDE))
+
+  # Build per-route coordinate sequences by just chaining stops
+  route_coords_simple <- route_sequence %>%
+    arrange(BASE_VERSION, LINE_NO, ROUTE_ABBR, SEQUENCE_NO) %>%
+    left_join(stop_coords, by = c("BASE_VERSION","POINT_NO","POINT_TYPE")) %>%
+    filter(!is.na(lon), !is.na(lat)) %>%
+    group_by(BASE_VERSION, LINE_NO, ROUTE_ABBR) %>%
+    reframe(coordinates = list(pick(lon, lat))) %>%
+    ungroup()
+
+  # Dedupe by hash instead of long strings
+  route_coords_simple <- route_coords_simple %>%
+    mutate(coord_hash = sapply(coordinates, function(df) digest::digest(as.matrix(df))))
+
+  unique_shapes <- route_coords_simple %>%
+    distinct(coord_hash, .keep_all = TRUE) %>%
+    mutate(shape_id = paste0("shape_", row_number()))
+
+  route_to_shape <- route_coords_simple %>%
+    left_join(unique_shapes %>% select(coord_hash, shape_id), by = "coord_hash") %>%
+    select(BASE_VERSION, LINE_NO, ROUTE_ABBR, shape_id)
+
+  # Flatten to shapes.txt
+  shapes_txt <- unique_shapes %>%
+    select(shape_id, coordinates) %>%
+    tidyr::unnest(coordinates) %>%
+    group_by(shape_id) %>%
+    mutate(
+      shape_pt_sequence = dplyr::row_number(),
+      shape_dist_traveled = c(0, cumsum(geosphere::distHaversine(
+        cbind(lon[-n()], lat[-n()]), cbind(lon[-1], lat[-1])
+      )))
+    ) %>%
+    ungroup() %>%
+    transmute(shape_id,
+              shape_pt_lat = lat,
+              shape_pt_lon = lon,
+              shape_pt_sequence,
+              shape_dist_traveled)
+
+  # write shapes.txt
+  
+  shapes_txt %>% write_csv("gtfs/shapes.txt")
+
+  # trips.txt with shape_id
+  stop_times %>%
+    select(trip_id = JOURNEY_NO, route_id = LINE_NO, ROUTE_ABBR) %>%
+    distinct() %>%
+    left_join(route_to_shape, by = c("route_id" = "LINE_NO", "ROUTE_ABBR" = "ROUTE_ABBR")) %>%
+    mutate(service_id = 1) %>%
+    select(trip_id, route_id, service_id, shape_id) %>%
+    write_csv("gtfs/trips.txt")
 
   # stops.txt
   stop %>% 
@@ -220,26 +214,30 @@ day_type = 15
     ) %>%
     write_csv("gtfs/stops.txt")
 
-  # shapes.txt
-  shapes_txt <- route_shapes %>%
-    st_as_sf() %>%
-    st_cast("POINT") %>%
-    group_by(LINE_NO, ROUTE_ABBR) %>%
-    mutate(
-      shape_id = paste0(LINE_NO, "_", ROUTE_ABBR),
-      shape_pt_sequence = row_number(),
-      shape_pt_lon = st_coordinates(geometry)[,1],
-      shape_pt_lat = st_coordinates(geometry)[,2]
-    ) %>%
-    ungroup() %>%
-    select(shape_id, shape_pt_lat, shape_pt_lon, shape_pt_sequence) %>%
-    st_drop_geometry()
+  # agency.txt
   
-  write_csv(shapes_txt, "gtfs/shapes.txt")
+  agency <- tibble::tibble(
+    agency_id = "1",
+    agency_name = "ITC",
+    agency_url = "https://example.com",
+    agency_timezone = "Asia/Dubai",
+    agency_lang = "ar",
+    agency_phone = NA_character_,
+    agency_fare_url = NA_character_,
+    agency_email = NA_character_
+  )
+  
+  readr::write_csv(agency, "gtfs/agency.txt")
+  
+  
+  # calendar
+  
+  
+  
+  
 
-  # # Create visualizations
-  # plf_data <- read_excel('route_shapes/Peak Load by Route (APC)_Oct 2024.xlsx')
-  # plf_map <- create_plf_map(route_shapes, plf_data)
-  # htmlwidgets::saveWidget(plf_map, file = "ad_plf_map.html", selfcontained = TRUE)
+
+
+
 
 
