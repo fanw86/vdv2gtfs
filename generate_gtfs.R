@@ -100,7 +100,7 @@ calculate_stop_times <- function(trip_stop_mapping, travel_time) {
 
 
 ### Main Execution ###
-day_type = 15
+
 
   folder <- "./vdv_202505080912"
   
@@ -113,10 +113,12 @@ day_type = 15
   link <- load_vdv_table(folder, "i2991280.x10")
   point_on_link <- load_vdv_table(folder, "i9951280.x10")
   routes <- load_vdv_table(folder, "i2261280.x10")
+  day_type <- load_vdv_table(folder, "i2901280.x10")
+  period <- load_vdv_table(folder, "i3481280.x10")
 
   # Process stop times
   trip_stop_mapping <- create_trip_stop_mapping(journey, route_sequence,routes)
-  trip_stop_mapping_rev <- trip_stop_mapping %>% filter(ROUTE_ABBR < 30)
+  trip_stop_mapping_rev <- trip_stop_mapping %>% filter(JOURNEY_TYPE_NO==1)
   stop_times <- calculate_stop_times(trip_stop_mapping_rev, travel_time) 
 
 
@@ -195,10 +197,9 @@ day_type = 15
 
   # trips.txt with shape_id
   stop_times %>%
-    select(trip_id = JOURNEY_NO, route_id = LINE_NO, ROUTE_ABBR) %>%
+    select(trip_id = JOURNEY_NO, route_id = LINE_NO, ROUTE_ABBR, service_id = DAY_TYPE_NO) %>%
     distinct() %>%
     left_join(route_to_shape, by = c("route_id" = "LINE_NO", "ROUTE_ABBR" = "ROUTE_ABBR")) %>%
-    mutate(service_id = 1) %>%
     select(trip_id, route_id, service_id, shape_id) %>%
     write_csv("gtfs/trips.txt")
 
@@ -218,13 +219,13 @@ day_type = 15
   
   agency <- tibble::tibble(
     agency_id = "1",
-    agency_name = "ITC",
-    agency_url = "https://example.com",
+    agency_name = "ITC Abu Dhabi",
+    agency_url = "https://admobility.gov.ae/en/",
     agency_timezone = "Asia/Dubai",
     agency_lang = "ar",
     agency_phone = NA_character_,
     agency_fare_url = NA_character_,
-    agency_email = NA_character_
+    agency_email = "webmaster@itc.gov.ae"
   )
   
   readr::write_csv(agency, "gtfs/agency.txt")
@@ -232,7 +233,21 @@ day_type = 15
   
   # calendar
   
-  
+    calendar <- day_type %>%
+    mutate(
+      service_id = DAY_TYPE_NO,
+      monday = ifelse(DAY_TYPE_DESC == "Monday", 1, 0),
+      tuesday = ifelse(DAY_TYPE_DESC == "Tuesday", 1, 0),
+      wednesday = ifelse(DAY_TYPE_DESC == "Wednesday", 1, 0),
+      thursday = ifelse(DAY_TYPE_DESC == "Thursday", 1, 0),
+      friday = ifelse(DAY_TYPE_DESC == "Friday", 1, 0),
+      saturday = ifelse(DAY_TYPE_DESC == "Saturday", 1, 0),
+      sunday = ifelse(DAY_TYPE_DESC == "Sunday", 1, 0),
+      start_date = format(min(as.Date(as.character(period$OPERATING_DAY), "%Y%m%d")), "%Y%m%d"),
+      end_date = format(max(as.Date(as.character(period$OPERATING_DAY), "%Y%m%d")), "%Y%m%d")
+    ) %>%
+    select(service_id, monday, tuesday, wednesday, thursday, friday, saturday, sunday, start_date, end_date) %>%
+    write_csv("gtfs/calendar.txt")
   
   
 
