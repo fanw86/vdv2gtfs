@@ -152,11 +152,59 @@ calculate_stop_times <- function(trip_stop_mapping, travel_time) {
               lon = convert_to_decimal(POINT_LONGITUDE),
               lat = convert_to_decimal(POINT_LATITUDE))
 
-  # Build per-route coordinate sequences by just chaining stops
-  route_coords_simple <- route_sequence %>%
+  # Build detailed route geometry using links and intermediate points
+  route_geometry <- route_sequence %>%
     arrange(BASE_VERSION, LINE_NO, ROUTE_ABBR, SEQUENCE_NO) %>%
-    left_join(stop_coords, by = c("BASE_VERSION","POINT_NO","POINT_TYPE")) %>%
+    group_by(BASE_VERSION, LINE_NO, ROUTE_ABBR) %>%
+    mutate(TO_POINT_NO = lead(POINT_NO)) %>%
+    filter(!is.na(TO_POINT_NO)) %>%  # Remove last stop (no outgoing link)
+    ungroup()
+  
+  # Join with link table to get link information
+  route_links <- route_geometry %>%
+    left_join(link, by = c("BASE_VERSION" = "BASE_VERSION",
+                          "POINT_TYPE" = "POINT_TYPE", 
+                          "POINT_NO" = "POINT_NO",
+                          "TO_POINT_NO" = "TO_POINT_NO"
+                          )) %>%
+    filter(!is.na(LINK_DISTANCE))  # Keep only valid links
+  
+  # Get intermediate points along each link
+  detailed_geometry <- route_links %>%
+    left_join(point_on_link, by = c("BASE_VERSION" = "BASE_VERSION",
+                                   "POINT_TYPE" = "POINT_TYPE",
+                                   "POINT_NO" = "POINT_NO", 
+                                   "TO_POINT_NO" = "TO_POINT_NO")) %>%
+    filter(!is.na(POINT_TO_LINK_NO)) %>%
+    # Get coordinates for intermediate points
+    left_join(stop_coords, by = c("BASE_VERSION" = "BASE_VERSION",
+                                 "POINT_TO_LINK_TYPE" = "POINT_TYPE",
+                                 "POINT_TO_LINK_NO" = "POINT_NO")) %>%
     filter(!is.na(lon), !is.na(lat)) %>%
+    arrange(BASE_VERSION, LINE_NO, ROUTE_ABBR, SEQUENCE_NO, POINT_ON_LINK_SERIAL_NO)
+  
+  # Fallback: Use original stop coordinates where link geometry is missing
+  fallback_geometry <- route_sequence %>%
+    anti_join(detailed_geometry %>% 
+              select(BASE_VERSION, LINE_NO, ROUTE_ABBR, POINT_NO) %>% 
+              distinct(),
+              by = c("BASE_VERSION", "LINE_NO", "ROUTE_ABBR", "POINT_NO")) %>%
+    left_join(stop_coords, by = c("BASE_VERSION", "POINT_NO", "POINT_TYPE")) %>%
+    filter(!is.na(lon), !is.na(lat))
+  
+  # Combine detailed geometry with fallback stops
+  combined_geometry <- bind_rows(
+    detailed_geometry %>% 
+      select(BASE_VERSION, LINE_NO, ROUTE_ABBR, SEQUENCE_NO, lon, lat, 
+             order_priority = POINT_ON_LINK_SERIAL_NO),
+    fallback_geometry %>% 
+      select(BASE_VERSION, LINE_NO, ROUTE_ABBR, SEQUENCE_NO, lon, lat) %>%
+      mutate(order_priority = 1)  # Give stops priority 1
+  ) %>%
+    arrange(BASE_VERSION, LINE_NO, ROUTE_ABBR, SEQUENCE_NO, order_priority)
+  
+  # Group coordinates by route
+  route_coords_simple <- combined_geometry %>%
     group_by(BASE_VERSION, LINE_NO, ROUTE_ABBR) %>%
     reframe(coordinates = list(pick(lon, lat))) %>%
     ungroup()
@@ -195,11 +243,14 @@ calculate_stop_times <- function(trip_stop_mapping, travel_time) {
   
   shapes_txt %>% write_csv("gtfs/shapes.txt")
 
-  # trips.txt with shape_id
+  # trips.txt with shape_id (FIXED: Include BASE_VERSION in join)
   stop_times %>%
-    select(trip_id = JOURNEY_NO, route_id = LINE_NO, ROUTE_ABBR, service_id = DAY_TYPE_NO) %>%
+    select(trip_id = JOURNEY_NO, route_id = LINE_NO, ROUTE_ABBR, 
+           service_id = DAY_TYPE_NO, BASE_VERSION) %>%
     distinct() %>%
-    left_join(route_to_shape, by = c("route_id" = "LINE_NO", "ROUTE_ABBR" = "ROUTE_ABBR")) %>%
+    left_join(route_to_shape, by = c("route_id" = "LINE_NO", 
+                                     "ROUTE_ABBR" = "ROUTE_ABBR",
+                                     "BASE_VERSION" = "BASE_VERSION")) %>%
     select(trip_id, route_id, service_id, shape_id) %>%
     write_csv("gtfs/trips.txt")
 
